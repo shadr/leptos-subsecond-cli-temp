@@ -2,7 +2,7 @@ use dioxus_devtools::DevserverMsg;
 
 fn foo() {
     let a = 10;
-    let b = 123123;
+    let b = 0;
     dbg!(a + b);
 }
 

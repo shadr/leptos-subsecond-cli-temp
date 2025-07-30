@@ -11,21 +11,36 @@ use std::{path::PathBuf, process::Command};
 use clap::Parser;
 use dioxus_devtools::DevserverMsg;
 use itertools::Itertools;
-use patch::{HotpatchModuleCache, create_jump_table, create_undefined_symbol_stub};
+use patch::{
+    HotpatchModuleCache, create_jump_table, create_undefined_symbol_stub, prepare_wasm_base_module,
+};
 use serde::{Deserialize, Serialize};
 use target_lexicon::{OperatingSystem, Triple};
 use tempfile::NamedTempFile;
 use tungstenite::handshake::server::{Request, Response};
 use uuid::Uuid;
+use wasm_bindgen_cli_support::Bindgen;
 
 #[derive(clap::Parser)]
 struct Args {
     #[clap(long)]
     manifest_path: PathBuf,
     #[clap(long)]
-    bin: String,
+    bin: Option<String>,
+    #[clap(long)]
+    lib: bool,
     #[clap(short, long, default_value = "true")]
     thin: bool,
+    #[clap(long, default_value = "Triple::host()")]
+    target: Triple,
+    #[clap(long)]
+    package: String,
+    #[clap(long)]
+    features: Vec<String>,
+    #[clap(long)]
+    rust_flags: Vec<String>,
+    #[clap(long, default_value = "false")]
+    no_default_features: bool,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -68,12 +83,15 @@ fn ws_server(channel: Receiver<DevserverMsg>, aslr_tx: Sender<u64>) {
 }
 
 fn main() {
-    let bundle_path = PathBuf::from("./target/bundle/");
-    std::fs::create_dir_all(&bundle_path).unwrap();
+    tracing_subscriber::fmt::init();
+
     let args = Args::parse();
     let manifest = args.manifest_path.canonicalize().unwrap();
-    let mut wd = manifest.clone();
-    wd.pop();
+    let mut working_dir = manifest.clone();
+    working_dir.pop();
+    let target_dir = working_dir.join("target");
+    let bundle_path = target_dir.join("bundle");
+    std::fs::create_dir_all(&bundle_path).unwrap();
 
     let rustc_wrapper_file = NamedTempFile::with_suffix(".json").unwrap();
     dbg!(rustc_wrapper_file.path());
@@ -87,18 +105,37 @@ fn main() {
     std::thread::spawn(|| ws_server(rx, aslr_tx));
 
     let ctx = Context {
-        target_dir: wd.join("target"),
-        working_dir: wd,
+        target_dir,
+        working_dir,
         bin: args.bin,
-        triple: Triple::host(),
+        lib: args.lib,
+        triple: args.target.clone(),
+        features: args.features,
         rustc_wrapper_file,
         link_args_file,
         link_err_file,
         bundle_path,
         profile_name: "dev".to_string(),
         profile_dir: "debug".to_string(),
-        package: "rustbox".to_string(),
-        linker_flavor: LinkerFlavor::Gnu,
+        package: args.package,
+        linker_flavor: match args.target.environment {
+            target_lexicon::Environment::Gnu
+            | target_lexicon::Environment::Gnuabi64
+            | target_lexicon::Environment::Gnueabi
+            | target_lexicon::Environment::Gnueabihf
+            | target_lexicon::Environment::GnuLlvm => LinkerFlavor::Gnu,
+            _ => match args.target.operating_system {
+                OperatingSystem::Linux => LinkerFlavor::Gnu,
+                _ => match args.target.architecture {
+                    target_lexicon::Architecture::Wasm32 | target_lexicon::Architecture::Wasm64 => {
+                        LinkerFlavor::WasmLld
+                    }
+                    _ => LinkerFlavor::Unsupported,
+                },
+            },
+        },
+        rust_flags: args.rust_flags,
+        no_default_features: args.no_default_features,
     };
 
     let exe_path = build_fat(&ctx);
@@ -107,14 +144,23 @@ fn main() {
         serde_json::from_str(&std::fs::read_to_string(ctx.rustc_wrapper_file.path()).unwrap())
             .unwrap();
 
-    let cache = Arc::new(HotpatchModuleCache::new(&exe_path, &Triple::host()).unwrap());
-    let mut exe_cmd = Command::new(exe_path);
-    let mut exe = exe_cmd.spawn().unwrap();
+    let cache = Arc::new(HotpatchModuleCache::new(&exe_path, &ctx.triple).unwrap());
+    let mut pid = None;
+    let mut exe = None;
+    if ctx.bin.is_some() {
+        let mut exe_cmd = Command::new(exe_path);
+        let new_exe = exe_cmd.spawn().unwrap();
+        pid = Some(new_exe.id());
+        exe = Some(new_exe);
+    }
 
     let mut aslr_reference = 0;
     if let Ok(aslr) = aslr_rx.recv_timeout(Duration::from_secs(1)) {
         aslr_reference = aslr;
+    } else {
+        dbg!("aslr timeout");
     }
+    dbg!(aslr_reference);
 
     let mut line = String::new();
     loop {
@@ -124,15 +170,33 @@ fn main() {
             "r" => {
                 println!("RELOADING");
                 let time_start = build_thin(&ctx, &rustc_args, aslr_reference, &cache);
+
                 let new = patch_exe(&ctx, time_start);
-                let jump_table = create_jump_table(&new, &ctx.triple, &cache).unwrap();
+                dbg!(&new);
+                tracing::debug!("Patching {} -> {}", "", new.display());
+                let mut jump_table = create_jump_table(&new, &ctx.triple, &cache).unwrap();
+
+                if ctx.triple.architecture == target_lexicon::Architecture::Wasm32 {
+                    // Make sure we use the dir relative to the public dir, so the web can load it as a proper URL
+                    //
+                    // ie we would've shipped `/Users/foo/Projects/dioxus/target/dx/project/debug/web/public/wasm/lib.wasm`
+                    //    but we want to ship `/wasm/lib.wasm`
+                    let patch_lib_name = jump_table.lib.file_name().unwrap();
+                    std::fs::copy(
+                        &jump_table.lib,
+                        ctx.target_dir.join("site/pkg").join(patch_lib_name),
+                    )
+                    .unwrap();
+                    jump_table.lib = PathBuf::from("/pkg/").join(patch_lib_name);
+                }
+
                 let msg = DevserverMsg::HotReload(dioxus_devtools::HotReloadMsg {
                     templates: Vec::new(),
                     assets: Vec::new(),
                     ms_elapsed: 0,
                     jump_table: Some(jump_table),
                     for_build_id: None,
-                    for_pid: Some(exe.id()),
+                    for_pid: pid,
                 });
                 tx.send(msg).unwrap();
             }
@@ -143,13 +207,16 @@ fn main() {
             _ => (),
         }
     }
-    exe.kill().unwrap();
+    if let Some(mut exe) = exe {
+        exe.kill().unwrap();
+    }
 }
 
 struct Context {
     working_dir: PathBuf,
     target_dir: PathBuf,
-    bin: String,
+    bin: Option<String>,
+    lib: bool,
     triple: Triple,
     rustc_wrapper_file: NamedTempFile,
     link_args_file: NamedTempFile,
@@ -159,11 +226,103 @@ struct Context {
     profile_name: String,
     package: String,
     linker_flavor: LinkerFlavor,
+    features: Vec<String>,
+    rust_flags: Vec<String>,
+    no_default_features: bool,
 }
 
 impl Context {
     pub fn frameworks_directory(&self) -> PathBuf {
         self.target_dir.join("frameworks")
+    }
+
+    fn select_linker(&self) -> PathBuf {
+        match self.linker_flavor {
+            LinkerFlavor::WasmLld => PathBuf::from("wasm-ld"),
+            LinkerFlavor::Gnu => PathBuf::from("cc"),
+            _ => PathBuf::from("cc"),
+        }
+    }
+
+    fn is_wasm_or_wasi(&self) -> bool {
+        matches!(
+            self.triple.architecture,
+            target_lexicon::Architecture::Wasm32 | target_lexicon::Architecture::Wasm64
+        ) || self.triple.operating_system == target_lexicon::OperatingSystem::Wasi
+    }
+
+    fn final_binary_name(&self) -> String {
+        if let Some(bin_name) = &self.bin {
+            return bin_name.clone();
+        }
+        if self.lib {
+            return self.package.clone();
+        }
+        unreachable!("you should specify either bin {{name}} or lib");
+    }
+}
+
+fn write_executable(ctx: &Context, compiled: &Path) -> PathBuf {
+    if ctx.is_wasm_or_wasi() {
+        let wasm_bindgen_dir = ctx.target_dir.join("wasm-bindgen/");
+        std::fs::remove_dir_all(&wasm_bindgen_dir).unwrap();
+        std::fs::create_dir_all(&wasm_bindgen_dir).unwrap();
+
+        tracing::info!("preparing wasm file for bindgen");
+        let unprocessed = std::fs::read(compiled).unwrap();
+        let all_exported_bytes = prepare_wasm_base_module(&unprocessed).unwrap();
+        std::fs::write(compiled, all_exported_bytes).unwrap();
+        tracing::info!("preparing wasm file done");
+
+        tracing::info!("running wasm-bindgen");
+        let mut bindgen = Bindgen::new()
+            .keep_lld_exports(true)
+            .demangle(false) // do no demangle names, hotpatchmodulecache ifunc map not populated properly with demangled names for some reason
+            .debug(true)
+            .keep_debug(true)
+            .input_path(compiled)
+            .out_name(&ctx.final_binary_name())
+            .web(true)
+            .unwrap()
+            .generate_output()
+            .unwrap();
+
+        bindgen.emit(&wasm_bindgen_dir).unwrap();
+        tracing::info!("wasm-bindgen done");
+
+        let new_wasm_path = wasm_bindgen_dir
+            .join(ctx.final_binary_name())
+            .with_extension("wasm");
+
+        std::fs::rename(
+            wasm_bindgen_dir.join(format!("{}_bg.wasm", ctx.final_binary_name())),
+            &new_wasm_path,
+        )
+        .unwrap();
+
+        std::fs::copy(
+            &new_wasm_path,
+            ctx.target_dir
+                .join("site/pkg")
+                .join(new_wasm_path.file_name().unwrap()),
+        )
+        .unwrap();
+
+        let js_path = new_wasm_path.with_file_name(format!("{}.js", ctx.final_binary_name()));
+
+        std::fs::copy(
+            &js_path,
+            ctx.target_dir
+                .join("site/pkg")
+                .join(js_path.file_name().unwrap()),
+        )
+        .unwrap();
+
+        new_wasm_path
+    } else {
+        let bundle_exe = ctx.bundle_path.join(&ctx.final_binary_name());
+        std::fs::copy(&compiled, &bundle_exe).unwrap();
+        bundle_exe
     }
 }
 
@@ -172,10 +331,10 @@ fn patch_exe(ctx: &Context, time_start: SystemTime) -> PathBuf {
         .target_dir
         .join(ctx.triple.to_string())
         .join(&ctx.profile_dir)
-        .join(&ctx.bin);
+        .join(ctx.final_binary_name());
     let path = compiled_exe.with_file_name(format!(
         "lib{}-patch-{}",
-        ctx.bin,
+        ctx.final_binary_name(),
         time_start
             .duration_since(UNIX_EPOCH)
             .map(|f| f.as_millis())
@@ -429,11 +588,7 @@ fn write_patch(
     // Requiring the ASLR offset here is necessary but unfortunately might be flakey in practice.
     // Android apps can take a long time to open, and a hot patch might've been issued in the interim,
     // making this hotpatch a failure.
-    if !(matches!(
-        ctx.triple.architecture,
-        target_lexicon::Architecture::Wasm32 | target_lexicon::Architecture::Wasm64
-    ) || ctx.triple.operating_system == target_lexicon::OperatingSystem::Wasi)
-    {
+    if !ctx.is_wasm_or_wasi() {
         let stub_bytes =
             create_undefined_symbol_stub(cache, &object_files, &ctx.triple, aslr_reference)
                 .expect("failed to resolve patch symbols");
@@ -454,8 +609,7 @@ fn write_patch(
     }
 
     // And now we can run the linker with our new args
-    // TODO: select linker
-    let linker = PathBuf::from("cc");
+    let linker = ctx.select_linker();
     let out_exe = patch_exe(ctx, time_start);
     let out_arg = match ctx.triple.operating_system {
         OperatingSystem::Windows => vec![format!("/OUT:{}", out_exe.display())],
@@ -491,15 +645,14 @@ fn write_patch(
         .envs(rustc_args.envs.iter().map(|(k, v)| (k, v)));
     let res = linker_command.output().unwrap();
 
-    // TODO: error handling
-    // if !res.stderr.is_empty() {
-    //     let errs = String::from_utf8_lossy(&res.stderr);
-    //     if !self.patch_exe(artifacts.time_start).exists() || !res.status.success() {
-    //         tracing::error!("Failed to generate patch: {}", errs.trim());
-    //     } else {
-    //         tracing::trace!("Linker output during thin linking: {}", errs.trim());
-    //     }
-    // }
+    if !res.stderr.is_empty() {
+        let errs = String::from_utf8_lossy(&res.stderr);
+        if !patch_exe(ctx, time_start).exists() || !res.status.success() {
+            tracing::error!("Failed to generate patch: {}", errs.trim());
+        } else {
+            tracing::trace!("Linker output during thin linking: {}", errs.trim());
+        }
+    }
 
     // For some really weird reason that I think is because of dlopen caching, future loads of the
     // jump library will fail if we don't remove the original fat file. I think this could be
@@ -541,7 +694,7 @@ fn build_thin(
         .target_dir
         .join(ctx.triple.to_string())
         .join(&ctx.profile_dir)
-        .join(&ctx.bin);
+        .join(&ctx.final_binary_name());
 
     write_patch(
         ctx,
@@ -575,15 +728,14 @@ fn build_thin_command(ctx: &Context, rustc_args: &RustcArgs) -> Command {
             "DX_LINK_ERR_FILE",
             ctx.link_err_file.path().canonicalize().unwrap(),
         )
-        .env("DX_LINK_TRIPLE", "x86_64-unknown-linux-gnu")
+        .env("DX_LINK_TRIPLE", ctx.triple.to_string())
         .arg(format!("-Clinker=dx"));
 
-    // if self.is_wasm_or_wasi() {
-    //     cmd.arg("-Crelocation-model=pic");
-    // }
+    if ctx.is_wasm_or_wasi() {
+        cmd.arg("-Crelocation-model=pic");
+    }
 
     cmd.envs(rustc_args.envs.iter().cloned());
-    //
 
     cmd
 }
@@ -742,7 +894,7 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
         // Run the ranlib command to index the archive. This slows down this process a bit,
         // but is necessary for some linkers to work properly.
         // We ignore its error in case it doesn't recognize the architecture
-        // if self.linker_flavor() == LinkerFlavor::Darwin {
+        // if ctx.linker_flavor == LinkerFlavor::Darwin {
         //     if let Some(ranlib) = Workspace::select_ranlib() {
         //         _ = Command::new(ranlib).arg(&out_ar_path).output();
         //     }
@@ -837,11 +989,11 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
     }
 
     // We want to go through wasm-ld directly, so we need to remove the -flavor flag
-    // TODO: if self.is_wasm_or_wasi() {
-    //     let flavor_idx = args.iter().position(|arg| *arg == "-flavor").unwrap();
-    //     args.remove(flavor_idx + 1);
-    //     args.remove(flavor_idx);
-    // }
+    if ctx.is_wasm_or_wasi() {
+        let flavor_idx = args.iter().position(|arg| *arg == "-flavor").unwrap();
+        args.remove(flavor_idx + 1);
+        args.remove(flavor_idx);
+    }
 
     // Set the output file
     match ctx.triple.operating_system {
@@ -850,8 +1002,7 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
     }
 
     // And now we can run the linker with our new args
-    // TODO: select linker based on flavor
-    let linker = PathBuf::from("cc");
+    let linker = ctx.select_linker();
 
     tracing::trace!("Fat linking with args: {:?} {:#?}", linker, args);
     tracing::trace!("Fat linking with env:");
@@ -919,7 +1070,7 @@ fn build_fat(ctx: &Context) -> PathBuf {
         .target_dir
         .join(ctx.triple.to_string())
         .join(&ctx.profile_dir)
-        .join(&ctx.bin);
+        .join(&ctx.final_binary_name());
 
     let mut rustc_args: RustcArgs =
         serde_json::from_str(&std::fs::read_to_string(ctx.rustc_wrapper_file.path()).unwrap())
@@ -932,8 +1083,7 @@ fn build_fat(ctx: &Context) -> PathBuf {
 
     fat_link(ctx, &compiled_exe, &rustc_args);
 
-    let bundle_exe = ctx.bundle_path.join(&ctx.bin);
-    std::fs::copy(&compiled_exe, &bundle_exe).unwrap();
+    let bundle_exe = write_executable(ctx, &compiled_exe);
 
     bundle_exe
 }
@@ -960,7 +1110,7 @@ fn build_fat_command(ctx: &Context) -> Command {
             "DX_LINK_ERR_FILE",
             ctx.link_err_file.path().canonicalize().unwrap(),
         )
-        .env("DX_LINK_TRIPLE", "x86_64-unknown-linux-gnu")
+        .env("DX_LINK_TRIPLE", ctx.triple.to_string())
         .arg("rustc")
         .current_dir(&ctx.working_dir)
         .arg("--profile")
@@ -968,18 +1118,64 @@ fn build_fat_command(ctx: &Context) -> Command {
         .arg("-p")
         .arg(&ctx.package)
         .arg("--target")
-        .arg(ctx.triple.to_string())
-        .arg("--bin")
-        .arg(&ctx.bin)
-        // .arg("--message-format")
-        // .arg("json-diagnostic-rendered-ansi")
-        .arg("--")
-        .arg("-Clinker=dx")
-        .arg("-Clink-arg=-Wl,-rpath,$ORIGIN/../lib")
-        .arg("-Clink-arg=-Wl,-rpath,$ORIGIN")
-        .arg("-Csave-temps=true")
-        .arg("-Clink-dead-code");
+        .arg(ctx.triple.to_string());
+    if ctx.no_default_features {
+        command.arg("--no-default-features");
+    }
+    if let Some(bin_name) = &ctx.bin {
+        command.arg("--bin").arg(bin_name);
+    }
+    if ctx.lib {
+        command.arg("--lib");
+    }
+    if !ctx.features.is_empty() {
+        command.arg("--features");
+        for feature in &ctx.features {
+            command.arg(feature);
+        }
+    }
+    // .arg("--message-format")
+    // .arg("json-diagnostic-rendered-ansi")
+    command.arg("--").arg("-Clinker=dx");
+    if ctx.triple.operating_system == OperatingSystem::Linux {
+        command
+            .arg("-Clink-arg=-Wl,-rpath,$ORIGIN/../lib")
+            .arg("-Clink-arg=-Wl,-rpath,$ORIGIN");
+    }
+    command.arg("-Csave-temps=true").arg("-Clink-dead-code");
 
-    // todo: add args for wasm target
+    let mut rust_flags = ctx
+        .rust_flags
+        .iter()
+        .map(|flag| {
+            if flag.starts_with("cfg") {
+                "--".to_string() + flag
+            } else {
+                flag.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if ctx.is_wasm_or_wasi() {
+        rust_flags.push("-Ctarget-cpu=mvp".to_string());
+    }
+
+    if !ctx.rust_flags.is_empty() {
+        command.env("RUSTFLAGS", rust_flags.join(" "));
+    }
+
+    if ctx.is_wasm_or_wasi() {
+        command
+            .arg("-Ctarget-cpu=mvp")
+            .arg("-Clink-arg=--no-gc-sections")
+            .arg("-Clink-arg=--growable-table")
+            .arg("-Clink-arg=--export-table")
+            .arg("-Clink-arg=--export-memory")
+            .arg("-Clink-arg=--emit-relocs")
+            .arg("-Clink-arg=--export=__stack_pointer")
+            .arg("-Clink-arg=--export=__heap_base")
+            .arg("-Clink-arg=--export=__data_end");
+    }
+
     command
 }
