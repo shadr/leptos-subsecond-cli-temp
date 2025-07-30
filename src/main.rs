@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{path::PathBuf, process::Command};
 
@@ -59,26 +59,50 @@ pub enum LinkerFlavor {
     Unsupported, // a catch-all for unsupported linkers, usually the stripped-down unix ones
 }
 
-fn ws_server(channel: Receiver<DevserverMsg>, aslr_tx: Sender<u64>) {
+fn ws_server(receiver: multiqueue::BroadcastReceiver<DevserverMsg>, aslr_tx: Sender<u64>) {
     let server = TcpListener::bind("127.0.0.1:3100").unwrap();
-    let stream = server.incoming().next().unwrap().unwrap();
-    println!("WS connected");
-    let mut websocket = tungstenite::accept_hdr(stream, |request: &Request, response: Response| {
-        let split = request.uri().query().unwrap().split("&");
-        for s in split {
-            if let Some(aslr_str) = s.strip_prefix("aslr_reference=") {
-                let aslr_reference: u64 = aslr_str.parse().unwrap();
-                aslr_tx.send(aslr_reference).unwrap();
-            }
+    // TODO?: send accumulated patches to newly connected clients
+    // we don't modify original binary so if you run binary a second time then it wont have
+    // patches that been made between first and second launches
+    //
+    // UPD: now it uses `multiqueue` crate which provides broadcast spmc/mpmc channels
+    // and using `add_stream` seems to achieve that behaviour, sending previously built patches
+    for new_stream in server.incoming() {
+        if let Ok(stream) = new_stream {
+            let channel = receiver.add_stream();
+            let aslr_tx_clone = aslr_tx.clone();
+            std::thread::spawn(move || {
+                let mut websocket =
+                    tungstenite::accept_hdr(stream, |request: &Request, response: Response| {
+                        let split = request.uri().query().unwrap().split("&");
+                        // very ugly and bad hack to get aslr of a executable back
+                        // TODO: find another way to get aslr reference back
+                        for s in split {
+                            if let Some(aslr_str) = s.strip_prefix("aslr_reference=") {
+                                let aslr_reference: u64 = aslr_str.parse().unwrap();
+                                aslr_tx_clone.send(aslr_reference).unwrap();
+                            }
+                        }
+                        Ok(Response::from(response))
+                    })
+                    .unwrap();
+                println!("WS connected");
+
+                loop {
+                    if !websocket.can_write() {
+                        break;
+                    }
+                    if let Ok(msg) = channel.try_recv() {
+                        let serialized = serde_json::to_string(&msg).unwrap();
+                        websocket
+                            .send(tungstenite::Message::Text(serialized.into()))
+                            .unwrap();
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                println!("WS loop exited");
+            });
         }
-        Ok(Response::from(response))
-    })
-    .unwrap();
-    while let Ok(msg) = channel.recv() {
-        let serialized = serde_json::to_string(&msg).unwrap();
-        websocket
-            .send(tungstenite::Message::Text(serialized.into()))
-            .unwrap();
     }
 }
 
@@ -100,7 +124,7 @@ fn main() {
     let link_err_file = NamedTempFile::with_suffix(".txt").unwrap();
     dbg!(link_err_file.path());
 
-    let (tx, rx) = channel();
+    let (tx, rx) = multiqueue::broadcast_queue(10);
     let (aslr_tx, aslr_rx) = channel();
     std::thread::spawn(|| ws_server(rx, aslr_tx));
 
@@ -198,7 +222,7 @@ fn main() {
                     for_build_id: None,
                     for_pid: pid,
                 });
-                tx.send(msg).unwrap();
+                tx.try_send(msg).unwrap();
             }
             "e" => {
                 println!("EXITING");
@@ -705,9 +729,6 @@ fn build_thin(
         time_start,
     );
 
-    // let bundle_exe = ctx.bundle_path.join(&ctx.bin);
-    // std::fs::copy(&compiled_exe, &bundle_exe).unwrap();
-
     time_start
 }
 
@@ -894,6 +915,7 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
         // Run the ranlib command to index the archive. This slows down this process a bit,
         // but is necessary for some linkers to work properly.
         // We ignore its error in case it doesn't recognize the architecture
+        // TODO: darwin
         // if ctx.linker_flavor == LinkerFlavor::Darwin {
         //     if let Some(ranlib) = Workspace::select_ranlib() {
         //         _ = Command::new(ranlib).arg(&out_ar_path).output();
@@ -1012,6 +1034,7 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
 
     // Handle windows command files
     let out_args = args.clone();
+    // TODO: windows
     // if cfg!(windows) {
     //     let cmd_contents: String = out_args.iter().map(|f| format!("\"{f}\"")).join(" ");
     //     std::fs::write(self.command_file.path(), cmd_contents).unwrap();
@@ -1061,10 +1084,6 @@ fn build_fat(ctx: &Context) -> PathBuf {
     let mut cmd = build_fat_command(ctx);
     let mut process = cmd.spawn().unwrap();
     process.wait().unwrap();
-
-    // let mut perms = std::fs::metadata(&bundle_exe).unwrap().permissions();
-    // perms.set_mode(0o700);
-    // std::fs::set_permissions(&bundle_exe, perms).unwrap();
 
     let compiled_exe = ctx
         .target_dir
