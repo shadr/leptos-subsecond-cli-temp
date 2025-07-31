@@ -6,7 +6,7 @@ use target_lexicon::OperatingSystem;
 use uuid::Uuid;
 
 use crate::context::Context;
-use crate::{LinkerFlavor, RustcArgs, write_executable};
+use crate::{LinkerFlavor, RustcArgs};
 
 fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
     // Filter out the rlib files from the arguments
@@ -349,7 +349,7 @@ pub fn build_fat(ctx: &Context) -> PathBuf {
 
     fat_link(ctx, &compiled_exe, &rustc_args);
 
-    let bundle_exe = write_executable(ctx, &compiled_exe);
+    let bundle_exe = ctx.write_executable(&compiled_exe);
 
     bundle_exe
 }

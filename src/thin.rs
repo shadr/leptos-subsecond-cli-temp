@@ -6,7 +6,7 @@ use std::{path::PathBuf, process::Command};
 
 use crate::context::Context;
 use crate::patch::{HotpatchModuleCache, create_undefined_symbol_stub};
-use crate::{LinkerFlavor, RustcArgs, patch_exe};
+use crate::{LinkerFlavor, RustcArgs};
 use itertools::Itertools;
 use target_lexicon::OperatingSystem;
 
@@ -268,7 +268,7 @@ fn write_patch(
 
     // And now we can run the linker with our new args
     let linker = ctx.select_linker();
-    let out_exe = patch_exe(ctx, time_start);
+    let out_exe = ctx.patch_exe(time_start);
     let out_arg = match ctx.triple.operating_system {
         OperatingSystem::Windows => vec![format!("/OUT:{}", out_exe.display())],
         _ => vec!["-o".to_string(), out_exe.display().to_string()],
@@ -305,7 +305,7 @@ fn write_patch(
 
     if !res.stderr.is_empty() {
         let errs = String::from_utf8_lossy(&res.stderr);
-        if !patch_exe(ctx, time_start).exists() || !res.status.success() {
+        if !ctx.patch_exe(time_start).exists() || !res.status.success() {
             tracing::error!("Failed to generate patch: {}", errs.trim());
         } else {
             tracing::trace!("Linker output during thin linking: {}", errs.trim());

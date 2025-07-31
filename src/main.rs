@@ -4,21 +4,19 @@ mod patch;
 mod thin;
 
 use std::net::TcpListener;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use std::{path::PathBuf, process::Command};
 
 use clap::Parser;
 use context::Context;
 use dioxus_devtools::DevserverMsg;
-use patch::{HotpatchModuleCache, create_jump_table, prepare_wasm_base_module};
+use patch::{HotpatchModuleCache, create_jump_table};
 use serde::{Deserialize, Serialize};
 use target_lexicon::{OperatingSystem, Triple};
 use tempfile::NamedTempFile;
 use tungstenite::handshake::server::{Request, Response};
-use wasm_bindgen_cli_support::Bindgen;
 
 #[derive(clap::Parser)]
 struct Args {
@@ -199,9 +197,8 @@ fn main() {
                 println!("RELOADING");
                 let time_start = thin::build_thin(&ctx, &rustc_args, aslr_reference, &cache);
 
-                let new = patch_exe(&ctx, time_start);
-                dbg!(&new);
-                tracing::debug!("Patching {} -> {}", "", new.display());
+                let new = ctx.patch_exe(time_start);
+                // tracing::debug!("Patching {} -> {}", "", new.display());
                 let mut jump_table = create_jump_table(&new, &ctx.triple, &cache).unwrap();
 
                 if ctx.triple.architecture == target_lexicon::Architecture::Wasm32 {
@@ -238,96 +235,4 @@ fn main() {
     if let Some(mut exe) = exe {
         exe.kill().unwrap();
     }
-}
-
-pub fn write_executable(ctx: &Context, compiled: &Path) -> PathBuf {
-    if ctx.is_wasm_or_wasi() {
-        let wasm_bindgen_dir = ctx.target_dir.join("wasm-bindgen/");
-        let _ = std::fs::remove_dir_all(&wasm_bindgen_dir);
-        std::fs::create_dir_all(&wasm_bindgen_dir).unwrap();
-
-        tracing::info!("preparing wasm file for bindgen");
-        let unprocessed = std::fs::read(compiled).unwrap();
-        let all_exported_bytes = prepare_wasm_base_module(&unprocessed).unwrap();
-        std::fs::write(compiled, all_exported_bytes).unwrap();
-        tracing::info!("preparing wasm file done");
-
-        tracing::info!("running wasm-bindgen");
-        let mut bindgen = Bindgen::new()
-            .keep_lld_exports(true)
-            .demangle(false) // do no demangle names, hotpatchmodulecache ifunc map not populated properly with demangled names for some reason
-            .debug(true)
-            .keep_debug(true)
-            .input_path(compiled)
-            .out_name(&ctx.final_binary_name())
-            .web(true)
-            .unwrap()
-            .generate_output()
-            .unwrap();
-
-        bindgen.emit(&wasm_bindgen_dir).unwrap();
-        tracing::info!("wasm-bindgen done");
-
-        let new_wasm_path = wasm_bindgen_dir
-            .join(ctx.final_binary_name())
-            .with_extension("wasm");
-
-        std::fs::rename(
-            wasm_bindgen_dir.join(format!("{}_bg.wasm", ctx.final_binary_name())),
-            &new_wasm_path,
-        )
-        .unwrap();
-
-        std::fs::create_dir_all(ctx.target_dir.join("site/pkg")).unwrap();
-
-        std::fs::copy(
-            &new_wasm_path,
-            ctx.target_dir
-                .join("site/pkg")
-                .join(new_wasm_path.file_name().unwrap()),
-        )
-        .unwrap();
-
-        let js_path = new_wasm_path.with_file_name(format!("{}.js", ctx.final_binary_name()));
-
-        std::fs::copy(
-            &js_path,
-            ctx.target_dir
-                .join("site/pkg")
-                .join(js_path.file_name().unwrap()),
-        )
-        .unwrap();
-
-        new_wasm_path
-    } else {
-        let bundle_exe = ctx.bundle_path.join(&ctx.final_binary_name());
-        std::fs::copy(&compiled, &bundle_exe).unwrap();
-        bundle_exe
-    }
-}
-
-fn patch_exe(ctx: &Context, time_start: SystemTime) -> PathBuf {
-    let compiled_exe = ctx
-        .target_dir
-        .join(ctx.triple.to_string())
-        .join(&ctx.profile_dir)
-        .join(ctx.final_binary_name());
-    let path = compiled_exe.with_file_name(format!(
-        "lib{}-patch-{}",
-        ctx.final_binary_name(),
-        time_start
-            .duration_since(UNIX_EPOCH)
-            .map(|f| f.as_millis())
-            .unwrap_or(0),
-    ));
-
-    let extension = match ctx.linker_flavor {
-        LinkerFlavor::Darwin => "dylib",
-        LinkerFlavor::Gnu => "so",
-        LinkerFlavor::WasmLld => "wasm",
-        LinkerFlavor::Msvc => "dll",
-        LinkerFlavor::Unsupported => "",
-    };
-
-    path.with_extension(extension)
 }
