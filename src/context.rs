@@ -149,7 +149,7 @@ impl Context {
         tracing::info!("running wasm-bindgen");
         let mut bindgen = Bindgen::new()
             .keep_lld_exports(true)
-            .demangle(false) // do no demangle names, hotpatchmodulecache ifunc map not populated properly with demangled names for some reason
+            .demangle(false) // do not demangle names, hotpatchmodulecache ifunc map not populated properly with demangled names for some reason
             .debug(true)
             .keep_debug(true)
             .input_path(wasm)

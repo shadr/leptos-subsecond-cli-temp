@@ -1,0 +1,89 @@
+use std::{
+    path::{Path, PathBuf},
+    process::{Child, Command},
+    sync::Arc,
+};
+
+use dioxus_devtools::DevserverMsg;
+use multiqueue::BroadcastSender;
+
+use crate::{
+    RustcArgs,
+    context::Context,
+    patch::{HotpatchModuleCache, create_jump_table},
+    thin,
+};
+
+pub struct Builder {
+    pub ctx: Context,
+    cache: Arc<HotpatchModuleCache>,
+    rustc_args: RustcArgs,
+    patch_sender: BroadcastSender<DevserverMsg>,
+    pid: Option<u32>,
+}
+
+impl Builder {
+    pub fn new(ctx: Context, patch_sender: BroadcastSender<DevserverMsg>) -> Self {
+        Self {
+            ctx,
+            cache: Arc::new(HotpatchModuleCache::default()),
+            rustc_args: RustcArgs::default(),
+            patch_sender,
+            pid: None,
+        }
+    }
+
+    pub fn build_fat(&mut self) -> PathBuf {
+        let path = crate::fat::build_fat(&self.ctx);
+
+        self.rustc_args = serde_json::from_str(
+            &std::fs::read_to_string(self.ctx.rustc_wrapper_file.path()).unwrap(),
+        )
+        .unwrap();
+
+        self.cache = Arc::new(HotpatchModuleCache::new(&path, &self.ctx.triple).unwrap());
+
+        path
+    }
+
+    pub fn build_thin(&self) {
+        println!("RELOADING");
+        let aslr_reference = 0;
+        let time_start = thin::build_thin(&self.ctx, &self.rustc_args, aslr_reference, &self.cache);
+
+        let new = self.ctx.patch_exe(time_start);
+        // tracing::debug!("Patching {} -> {}", "", new.display());
+        let mut jump_table = create_jump_table(&new, &self.ctx.triple, &self.cache).unwrap();
+
+        if self.ctx.triple.architecture == target_lexicon::Architecture::Wasm32 {
+            // Make sure we use the dir relative to the public dir, so the web can load it as a proper URL
+            //
+            // ie we would've shipped `/Users/foo/Projects/dioxus/target/dx/project/debug/web/public/wasm/lib.wasm`
+            //    but we want to ship `/wasm/lib.wasm`
+            let patch_lib_name = jump_table.lib.file_name().unwrap();
+            self.ctx.write_thin_wasm_patch_to_pkg(&jump_table.lib);
+            jump_table.lib = PathBuf::from("/pkg/").join(patch_lib_name);
+        }
+
+        let msg = DevserverMsg::HotReload(dioxus_devtools::HotReloadMsg {
+            templates: Vec::new(),
+            assets: Vec::new(),
+            ms_elapsed: 0,
+            jump_table: Some(jump_table),
+            for_build_id: None,
+            for_pid: self.pid,
+        });
+        self.patch_sender.try_send(msg).unwrap();
+    }
+
+    pub fn run_if_native(&mut self, path: &Path) -> Option<Child> {
+        if self.ctx.bin.is_some() {
+            let mut exe_cmd = Command::new(path);
+            let new_exe = exe_cmd.spawn().unwrap();
+            self.pid = Some(new_exe.id());
+            Some(new_exe)
+        } else {
+            None
+        }
+    }
+}
