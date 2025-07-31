@@ -3,18 +3,6 @@ name = "rustbox"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "cli"
-path = "src/main.rs"
-
-[[bin]]
-name = "demo"
-path = "src/demo.rs"
-
-[[bin]]
-name = "demo2"
-path = "src/demo2.rs"
-
 [dependencies]
 # global-hotkey = "0.7.0"
 # xcap = "0.6.2"
@@ -27,7 +15,7 @@ path = "src/demo2.rs"
 # quote = "1.0" 
 # indexmap = "2.10"
 # subsecond = { version = "0.7.0-alpha.3", path = "../dioxus/packages/subsecond/subsecond" }
-subsecond = { version = "0.7.0-alpha.3" }
+# subsecond = { version = "0.7.0-alpha.3" }
 dioxus-devtools = { version = "0.7.0-alpha.3" }
 # dioxus-devtools = { version = "0.7.0-alpha.3", path = "../dioxus/packages/devtools" }
 clap = { version = "4.5.41", features = ["derive"] }
