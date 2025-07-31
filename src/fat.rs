@@ -347,6 +347,7 @@ pub fn build_fat(ctx: &Context) -> PathBuf {
     fat_link(ctx, &compiled_exe, &rustc_args);
 
     let bundle_exe = ctx.write_executable(&compiled_exe);
+    // TODO: write frameworks
 
     tracing::debug!(
         "Fat build finished in {}s",

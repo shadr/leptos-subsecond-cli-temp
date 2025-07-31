@@ -68,11 +68,8 @@ fn main() {
     std::fs::create_dir_all(&bundle_path).unwrap();
 
     let rustc_wrapper_file = NamedTempFile::with_suffix(".json").unwrap();
-    dbg!(rustc_wrapper_file.path());
     let link_args_file = NamedTempFile::with_suffix(".txt").unwrap();
-    dbg!(link_args_file.path());
     let link_err_file = NamedTempFile::with_suffix(".txt").unwrap();
-    dbg!(link_err_file.path());
 
     let aslr_reference = Arc::new(AtomicU64::new(0));
 

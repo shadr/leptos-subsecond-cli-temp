@@ -140,13 +140,13 @@ impl Context {
         let _ = std::fs::remove_dir_all(&wasm_bindgen_dir);
         std::fs::create_dir_all(&wasm_bindgen_dir).unwrap();
 
-        tracing::info!("preparing wasm file for bindgen");
+        tracing::info!("Preparing wasm file for bindgen");
         let unprocessed = std::fs::read(wasm).unwrap();
         let all_exported_bytes = prepare_wasm_base_module(&unprocessed).unwrap();
         std::fs::write(wasm, all_exported_bytes).unwrap();
-        tracing::info!("preparing wasm file done");
+        tracing::info!("Preparing wasm file finished");
 
-        tracing::info!("running wasm-bindgen");
+        tracing::info!("Running wasm-bindgen");
         let mut bindgen = Bindgen::new()
             .keep_lld_exports(true)
             .demangle(false) // do not demangle names, hotpatchmodulecache ifunc map not populated properly with demangled names for some reason
@@ -160,7 +160,7 @@ impl Context {
             .unwrap();
 
         bindgen.emit(&wasm_bindgen_dir).unwrap();
-        tracing::info!("wasm-bindgen done");
+        tracing::info!("Finished wasm-bindgen");
 
         let wasm_path = wasm_bindgen_dir
             .join(format!("{}_bg", self.final_binary_name()))

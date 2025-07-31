@@ -63,7 +63,7 @@ impl HotPatchServer {
                             Ok(Response::from(response))
                         })
                         .unwrap();
-                    println!("WS connected");
+                    tracing::debug!("New hot-patch client connected");
 
                     loop {
                         if !websocket.can_write() {
@@ -77,7 +77,6 @@ impl HotPatchServer {
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
-                    println!("WS loop exited");
                 });
             }
         }
