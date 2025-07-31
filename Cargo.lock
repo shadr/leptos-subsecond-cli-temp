@@ -616,6 +616,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "884e2677b40cc8c339eaefcb701c32ef1fd2493d71118dc0ca4b6a736c93bd67"
 
 [[package]]
+name = "leptos-subsecond-cli-temp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ar",
+ "clap",
+ "dioxus-devtools",
+ "itertools",
+ "log",
+ "multiqueue",
+ "object",
+ "pdb",
+ "rayon",
+ "serde",
+ "serde_json",
+ "subsecond-types",
+ "target-lexicon",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite",
+ "uuid",
+ "walrus",
+ "wasm-bindgen-cli-support",
+ "wasmparser 0.235.0",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.174"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -987,35 +1016,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5407465600fb0548f1442edf71dd20683c6ed326200ace4b1ef0763521bb3b77"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "rustbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ar",
- "clap",
- "dioxus-devtools",
- "itertools",
- "log",
- "multiqueue",
- "object",
- "pdb",
- "rayon",
- "serde",
- "serde_json",
- "subsecond-types",
- "target-lexicon",
- "tempfile",
- "thiserror",
- "tracing",
- "tracing-subscriber",
- "tungstenite",
- "uuid",
- "walrus",
- "wasm-bindgen-cli-support",
- "wasmparser 0.235.0",
 ]
 
 [[package]]
