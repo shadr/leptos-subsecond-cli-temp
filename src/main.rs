@@ -25,7 +25,7 @@ struct Args {
     lib: bool,
     #[clap(short, long, default_value = "true")]
     thin: bool,
-    #[clap(long, default_value = "Triple::host()")]
+    #[clap(long, default_value = "unknown-unknown-unknown")]
     target: Triple,
     #[clap(long)]
     package: String,
@@ -56,7 +56,10 @@ pub enum LinkerFlavor {
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if args.target == Triple::unknown() {
+        args.target = Triple::host();
+    }
     let manifest = args.manifest_path.canonicalize().unwrap();
     let mut working_dir = manifest.clone();
     working_dir.pop();
