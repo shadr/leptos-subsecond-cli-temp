@@ -134,7 +134,7 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
         // but is necessary for some linkers to work properly.
         // We ignore its error in case it doesn't recognize the architecture
         // TODO: darwin
-        // if ctx.linker_flavor == LinkerFlavor::Darwin {
+        // if ctx.linker_flavor() == LinkerFlavor::Darwin {
         //     if let Some(ranlib) = Workspace::select_ranlib() {
         //         _ = Command::new(ranlib).arg(&out_ar_path).output();
         //     }
@@ -150,7 +150,7 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
     let mut args: Vec<_> = rustc_args.link_args.iter().skip(1).cloned().collect();
     if let Some(last_object) = args.iter().rposition(|arg| arg.ends_with(".o")) {
         if archive_has_contents {
-            match ctx.linker_flavor {
+            match ctx.linker_flavor() {
                 LinkerFlavor::WasmLld => {
                     args.insert(last_object, "--whole-archive".to_string());
                     args.insert(last_object + 1, out_ar_path.display().to_string());
@@ -195,7 +195,7 @@ fn fat_link(ctx: &Context, exe: &Path, rustc_args: &RustcArgs) {
     }
 
     // Add custom args to the linkers
-    match ctx.linker_flavor {
+    match ctx.linker_flavor() {
         LinkerFlavor::Gnu => {
             // Export `main` so subsecond can use it for a reference point
             args.push("-Wl,--export-dynamic-symbol,main".to_string());
@@ -302,11 +302,7 @@ fn clean_fingerprint(ctx: &Context) {
     //
     // normally you can't rely on this structure (ie with `cargo build`) but the explicit
     // target arg guarantees this will work.
-    let fingerprint_dir = ctx
-        .target_dir
-        .join(ctx.triple.to_string())
-        .join(&ctx.profile_dir)
-        .join(".fingerprint");
+    let fingerprint_dir = ctx.target_triple_profile_dir().join(".fingerprint");
 
     // split at the last `-` used to separate the hash from the name
     // This causes to more aggressively bust hashes for all combinations of features
@@ -333,9 +329,7 @@ pub fn build_fat(ctx: &Context) -> PathBuf {
     process.wait().unwrap();
 
     let compiled_exe = ctx
-        .target_dir
-        .join(ctx.triple.to_string())
-        .join(&ctx.profile_dir)
+        .target_triple_profile_dir()
         .join(&ctx.final_binary_name());
 
     let mut rustc_args: RustcArgs =

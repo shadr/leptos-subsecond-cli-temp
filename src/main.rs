@@ -14,7 +14,7 @@ use context::Context;
 use dioxus_devtools::DevserverMsg;
 use patch::{HotpatchModuleCache, create_jump_table};
 use serde::{Deserialize, Serialize};
-use target_lexicon::{OperatingSystem, Triple};
+use target_lexicon::Triple;
 use tempfile::NamedTempFile;
 use tungstenite::handshake::server::{Request, Response};
 
@@ -144,24 +144,11 @@ fn main() {
         profile_name: "dev".to_string(),
         profile_dir: "debug".to_string(),
         package: args.package,
-        linker_flavor: match args.target.environment {
-            target_lexicon::Environment::Gnu
-            | target_lexicon::Environment::Gnuabi64
-            | target_lexicon::Environment::Gnueabi
-            | target_lexicon::Environment::Gnueabihf
-            | target_lexicon::Environment::GnuLlvm => LinkerFlavor::Gnu,
-            _ => match args.target.operating_system {
-                OperatingSystem::Linux => LinkerFlavor::Gnu,
-                _ => match args.target.architecture {
-                    target_lexicon::Architecture::Wasm32 | target_lexicon::Architecture::Wasm64 => {
-                        LinkerFlavor::WasmLld
-                    }
-                    _ => LinkerFlavor::Unsupported,
-                },
-            },
-        },
         rust_flags: args.rust_flags,
         no_default_features: args.no_default_features,
+        site_dir: "target/site".to_string(),
+        site_pkg_dir: "pkg".to_string(),
+        wasm_bindgen_dir: "wasm-bindgen".to_string(),
     };
 
     let exe_path = fat::build_fat(&ctx);
@@ -207,11 +194,7 @@ fn main() {
                     // ie we would've shipped `/Users/foo/Projects/dioxus/target/dx/project/debug/web/public/wasm/lib.wasm`
                     //    but we want to ship `/wasm/lib.wasm`
                     let patch_lib_name = jump_table.lib.file_name().unwrap();
-                    std::fs::copy(
-                        &jump_table.lib,
-                        ctx.target_dir.join("site/pkg").join(patch_lib_name),
-                    )
-                    .unwrap();
+                    ctx.write_thin_wasm_patch_to_pkg(&jump_table.lib);
                     jump_table.lib = PathBuf::from("/pkg/").join(patch_lib_name);
                 }
 

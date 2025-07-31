@@ -13,7 +13,7 @@ use target_lexicon::OperatingSystem;
 fn thin_link_args(ctx: &Context, original_args: &[&str]) -> Vec<String> {
     let mut out_args = vec![];
 
-    match ctx.linker_flavor {
+    match ctx.linker_flavor() {
         // wasm32-unknown-unknown -> use wasm-ld (gnu-lld)
         //
         // We need to import a few things - namely the memory and ifunc table.
@@ -349,9 +349,7 @@ pub fn build_thin(
     let mut process = cmd.spawn().unwrap();
     process.wait().unwrap();
     let compiled_exe = ctx
-        .target_dir
-        .join(ctx.triple.to_string())
-        .join(&ctx.profile_dir)
+        .target_triple_profile_dir()
         .join(&ctx.final_binary_name());
 
     write_patch(

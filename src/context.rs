@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use target_lexicon::Triple;
+use target_lexicon::{OperatingSystem, Triple};
 use tempfile::NamedTempFile;
 use wasm_bindgen_cli_support::Bindgen;
 
@@ -22,10 +22,12 @@ pub struct Context {
     pub profile_dir: String,
     pub profile_name: String,
     pub package: String,
-    pub linker_flavor: LinkerFlavor,
     pub features: Vec<String>,
     pub rust_flags: Vec<String>,
     pub no_default_features: bool,
+    pub site_dir: String,
+    pub site_pkg_dir: String,
+    pub wasm_bindgen_dir: String,
 }
 
 impl Context {
@@ -33,8 +35,45 @@ impl Context {
         self.target_dir.join("frameworks")
     }
 
+    pub fn site_dir_path(&self) -> PathBuf {
+        self.working_dir.join(&self.site_dir)
+    }
+
+    pub fn site_pkg_path(&self) -> PathBuf {
+        self.site_dir_path().join(&self.site_pkg_dir)
+    }
+
+    pub fn target_triple_profile_dir(&self) -> PathBuf {
+        self.target_dir
+            .join(self.triple.to_string())
+            .join(&self.profile_dir)
+    }
+
+    pub fn wasm_bindgen_dir_path(&self) -> PathBuf {
+        self.target_dir.join(&self.wasm_bindgen_dir)
+    }
+
+    pub fn linker_flavor(&self) -> LinkerFlavor {
+        match self.triple.environment {
+            target_lexicon::Environment::Gnu
+            | target_lexicon::Environment::Gnuabi64
+            | target_lexicon::Environment::Gnueabi
+            | target_lexicon::Environment::Gnueabihf
+            | target_lexicon::Environment::GnuLlvm => LinkerFlavor::Gnu,
+            _ => match self.triple.operating_system {
+                OperatingSystem::Linux => LinkerFlavor::Gnu,
+                _ => match self.triple.architecture {
+                    target_lexicon::Architecture::Wasm32 | target_lexicon::Architecture::Wasm64 => {
+                        LinkerFlavor::WasmLld
+                    }
+                    _ => LinkerFlavor::Unsupported,
+                },
+            },
+        }
+    }
+
     pub fn select_linker(&self) -> PathBuf {
-        match self.linker_flavor {
+        match self.linker_flavor() {
             LinkerFlavor::WasmLld => PathBuf::from("wasm-ld"),
             LinkerFlavor::Gnu => PathBuf::from("cc"),
             _ => PathBuf::from("cc"),
@@ -60,9 +99,7 @@ impl Context {
 
     pub fn patch_exe(&self, time_start: SystemTime) -> PathBuf {
         let compiled_exe = self
-            .target_dir
-            .join(self.triple.to_string())
-            .join(&self.profile_dir)
+            .target_triple_profile_dir()
             .join(self.final_binary_name());
         let path = compiled_exe.with_file_name(format!(
             "lib{}-patch-{}",
@@ -73,7 +110,7 @@ impl Context {
                 .unwrap_or(0),
         ));
 
-        let extension = match self.linker_flavor {
+        let extension = match self.linker_flavor() {
             LinkerFlavor::Darwin => "dylib",
             LinkerFlavor::Gnu => "so",
             LinkerFlavor::WasmLld => "wasm",
@@ -86,7 +123,7 @@ impl Context {
 
     pub fn write_executable(&self, compiled: &Path) -> PathBuf {
         if self.is_wasm_or_wasi() {
-            self.write_wasm(compiled)
+            self.write_with_bindgen(compiled)
         } else {
             self.write_native(compiled)
         }
@@ -98,8 +135,8 @@ impl Context {
         bundle_exe
     }
 
-    pub fn write_wasm(&self, wasm: &Path) -> PathBuf {
-        let wasm_bindgen_dir = self.target_dir.join("wasm-bindgen/");
+    pub fn write_with_bindgen(&self, wasm: &Path) -> PathBuf {
+        let wasm_bindgen_dir = self.wasm_bindgen_dir_path();
         let _ = std::fs::remove_dir_all(&wasm_bindgen_dir);
         std::fs::create_dir_all(&wasm_bindgen_dir).unwrap();
 
@@ -125,36 +162,43 @@ impl Context {
         bindgen.emit(&wasm_bindgen_dir).unwrap();
         tracing::info!("wasm-bindgen done");
 
-        let new_wasm_path = wasm_bindgen_dir
+        let wasm_path = wasm_bindgen_dir
+            .join(format!("{}_bg", self.final_binary_name()))
+            .with_extension("wasm");
+
+        self.write_fat_wasm_to_pkg();
+
+        wasm_path
+    }
+
+    pub fn write_fat_wasm_to_pkg(&self) {
+        std::fs::create_dir_all(self.site_pkg_path()).unwrap();
+
+        let wasm_bindgen_dir = self.wasm_bindgen_dir_path();
+
+        let wb_wasm_path = wasm_bindgen_dir
+            .join(format!("{}_bg", self.final_binary_name()))
+            .with_extension("wasm");
+        let pkg_wasm_path = self
+            .site_pkg_path()
             .join(self.final_binary_name())
             .with_extension("wasm");
 
-        std::fs::rename(
-            wasm_bindgen_dir.join(format!("{}_bg.wasm", self.final_binary_name())),
-            &new_wasm_path,
-        )
-        .unwrap();
+        std::fs::copy(&wb_wasm_path, pkg_wasm_path).unwrap();
 
-        std::fs::create_dir_all(self.target_dir.join("site/pkg")).unwrap();
+        let wb_js_path = wasm_bindgen_dir
+            .join(self.final_binary_name())
+            .with_extension("js");
+        let pkg_js_path = self
+            .site_pkg_path()
+            .join(self.final_binary_name())
+            .with_extension("js");
 
-        std::fs::copy(
-            &new_wasm_path,
-            self.target_dir
-                .join("site/pkg")
-                .join(new_wasm_path.file_name().unwrap()),
-        )
-        .unwrap();
+        std::fs::copy(&wb_js_path, pkg_js_path).unwrap();
+    }
 
-        let js_path = new_wasm_path.with_file_name(format!("{}.js", self.final_binary_name()));
-
-        std::fs::copy(
-            &js_path,
-            self.target_dir
-                .join("site/pkg")
-                .join(js_path.file_name().unwrap()),
-        )
-        .unwrap();
-
-        new_wasm_path
+    pub fn write_thin_wasm_patch_to_pkg(&self, patch_path: &Path) {
+        let patch_name = patch_path.file_name().unwrap();
+        std::fs::copy(patch_path, self.site_pkg_path().join(patch_name)).unwrap();
     }
 }
