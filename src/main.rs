@@ -6,6 +6,7 @@ mod thin;
 mod ws_server;
 
 use std::sync::Arc;
+use std::sync::mpsc::channel;
 use std::{path::PathBuf, sync::atomic::AtomicU64};
 
 use clap::Parser;
@@ -73,8 +74,19 @@ fn main() {
 
     let aslr_reference = Arc::new(AtomicU64::new(0));
 
-    let (tx, rx) = multiqueue::broadcast_queue(10);
-    let hp_server = HotPatchServer::new("127.0.0.1:3100", rx, Arc::clone(&aslr_reference));
+    let (clear_patches_tx, clear_patches_rx) = channel::<()>();
+
+    // TODO: reduce capacity of a queue
+    // but to do that we need to either read from rx or drop it in websocket loop,
+    // but we need to add streams to it when new client connects
+    // so idk how to do it right now, I wrote websocket code very poorly
+    let (tx, rx) = multiqueue::broadcast_queue(100);
+    let mut hp_server = HotPatchServer::new(
+        "127.0.0.1:3100",
+        rx,
+        Arc::clone(&aslr_reference),
+        clear_patches_rx,
+    );
     std::thread::spawn(move || hp_server.run());
 
     let ctx = Context {
@@ -98,10 +110,12 @@ fn main() {
         wasm_bindgen_dir: "wasm-bindgen".to_string(),
     };
 
-    let mut builder = builder::Builder::new(ctx, tx, aslr_reference);
+    let (command_tx, command_rx) = channel();
 
-    let binary_path = builder.build_fat();
-    builder.run_if_native(&binary_path);
+    let mut builder = builder::Builder::new(ctx, tx, aslr_reference, command_rx);
+    std::thread::spawn(move || builder.run());
+
+    command_tx.send(builder::BuildCommand::Fat).unwrap();
 
     let mut line = String::new();
     loop {
@@ -109,7 +123,11 @@ fn main() {
         std::io::stdin().read_line(&mut line).unwrap();
         match line.as_str().trim() {
             "r" => {
-                builder.build_thin();
+                command_tx.send(builder::BuildCommand::Thin).unwrap();
+            }
+            "R" => {
+                clear_patches_tx.send(()).unwrap();
+                command_tx.send(builder::BuildCommand::FatRebuild).unwrap();
             }
             "e" => {
                 println!("EXITING");

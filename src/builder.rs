@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command},
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, atomic::AtomicU64, mpsc::Receiver},
     time::Instant,
 };
 
@@ -15,6 +15,12 @@ use crate::{
     thin,
 };
 
+pub enum BuildCommand {
+    Thin,
+    Fat,
+    FatRebuild,
+}
+
 pub struct Builder {
     pub ctx: Context,
     cache: Arc<HotpatchModuleCache>,
@@ -23,6 +29,7 @@ pub struct Builder {
     pid: Option<u32>,
     aslr_reference: Arc<AtomicU64>,
     running_binary: Option<Child>,
+    command_receiver: Receiver<BuildCommand>,
 }
 
 impl Builder {
@@ -30,6 +37,7 @@ impl Builder {
         ctx: Context,
         patch_sender: BroadcastSender<DevserverMsg>,
         aslr_reference: Arc<AtomicU64>,
+        command_receiver: Receiver<BuildCommand>,
     ) -> Self {
         Self {
             ctx,
@@ -39,10 +47,43 @@ impl Builder {
             pid: None,
             aslr_reference,
             running_binary: None,
+            command_receiver,
         }
     }
 
-    pub fn build_fat(&mut self) -> PathBuf {
+    pub fn run(&mut self) {
+        while let Ok(command) = self.command_receiver.recv() {
+            match command {
+                BuildCommand::Thin => {
+                    self.build_thin();
+                }
+                BuildCommand::Fat => {
+                    self.build_fat();
+                }
+                BuildCommand::FatRebuild => {
+                    self.rebuild_fat();
+                }
+            }
+        }
+    }
+
+    pub fn kill_child_if_running(&mut self) {
+        if let Some(process) = &mut self.running_binary {
+            match process.kill() {
+                Ok(_) => tracing::debug!("Killed executable successfully"),
+                Err(_) => tracing::error!("Couldn't kill running executable!"),
+            }
+            self.running_binary = None;
+        }
+    }
+
+    pub fn rebuild_fat(&mut self) {
+        self.kill_child_if_running();
+
+        self.build_fat();
+    }
+
+    pub fn build_fat(&mut self) {
         let path = crate::fat::build_fat(&self.ctx);
 
         self.rustc_args = serde_json::from_str(
@@ -52,7 +93,7 @@ impl Builder {
 
         self.cache = Arc::new(HotpatchModuleCache::new(&path, &self.ctx.triple).unwrap());
 
-        path
+        self.run_if_native(&path);
     }
 
     pub fn build_thin(&self) {
@@ -108,11 +149,6 @@ impl Builder {
 
 impl Drop for Builder {
     fn drop(&mut self) {
-        if let Some(process) = &mut self.running_binary {
-            match process.kill() {
-                Ok(_) => tracing::debug!("Killed executable successfully"),
-                Err(_) => tracing::error!("Couldn't kill running executable!"),
-            }
-        }
+        self.kill_child_if_running();
     }
 }
