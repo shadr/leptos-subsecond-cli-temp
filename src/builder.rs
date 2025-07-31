@@ -2,6 +2,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command},
     sync::Arc,
+    time::Instant,
 };
 
 use dioxus_devtools::DevserverMsg;
@@ -47,13 +48,14 @@ impl Builder {
     }
 
     pub fn build_thin(&self) {
-        println!("RELOADING");
+        // TODO: fix native builds, store pid:aslr map
         let aslr_reference = 0;
         let time_start = thin::build_thin(&self.ctx, &self.rustc_args, aslr_reference, &self.cache);
 
         let new = self.ctx.patch_exe(time_start);
-        // tracing::debug!("Patching {} -> {}", "", new.display());
+        let now = Instant::now();
         let mut jump_table = create_jump_table(&new, &self.ctx.triple, &self.cache).unwrap();
+        tracing::debug!("Created jump table in {}s", now.elapsed().as_secs_f32());
 
         if self.ctx.triple.architecture == target_lexicon::Architecture::Wasm32 {
             // Make sure we use the dir relative to the public dir, so the web can load it as a proper URL
@@ -74,6 +76,10 @@ impl Builder {
             for_pid: self.pid,
         });
         self.patch_sender.try_send(msg).unwrap();
+        tracing::info!(
+            "Hot-patch created in {}s",
+            time_start.elapsed().unwrap().as_secs_f32()
+        );
     }
 
     pub fn run_if_native(&mut self, path: &Path) -> Option<Child> {

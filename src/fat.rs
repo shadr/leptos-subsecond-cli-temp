@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Instant;
 use std::{path::PathBuf, process::Command};
 
 use itertools::Itertools;
@@ -322,6 +323,8 @@ fn clean_fingerprint(ctx: &Context) {
 }
 
 pub fn build_fat(ctx: &Context) -> PathBuf {
+    tracing::debug!("Fat build started");
+    let time_start = Instant::now();
     clean_fingerprint(ctx);
 
     let mut cmd = build_fat_command(ctx);
@@ -344,6 +347,11 @@ pub fn build_fat(ctx: &Context) -> PathBuf {
     fat_link(ctx, &compiled_exe, &rustc_args);
 
     let bundle_exe = ctx.write_executable(&compiled_exe);
+
+    tracing::debug!(
+        "Fat build finished in {}s",
+        time_start.elapsed().as_secs_f32()
+    );
 
     bundle_exe
 }

@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use std::{path::PathBuf, process::Command};
 
 use crate::context::Context;
@@ -344,6 +344,7 @@ pub fn build_thin(
     aslr_reference: u64,
     cache: &Arc<HotpatchModuleCache>,
 ) -> SystemTime {
+    tracing::debug!("Thin build started");
     let time_start = SystemTime::now();
     let mut cmd = build_thin_command(ctx, rustc_args);
     let mut process = cmd.spawn().unwrap();
@@ -352,6 +353,7 @@ pub fn build_thin(
         .target_triple_profile_dir()
         .join(&ctx.final_binary_name());
 
+    let link_start = Instant::now();
     write_patch(
         ctx,
         &compiled_exe,
@@ -359,6 +361,15 @@ pub fn build_thin(
         cache,
         rustc_args,
         time_start,
+    );
+    tracing::debug!(
+        "Thin linking finished in {}s",
+        link_start.elapsed().as_secs_f32()
+    );
+
+    tracing::debug!(
+        "Thin build ended in {}s (includes link time)",
+        time_start.elapsed().unwrap().as_secs_f32()
     );
 
     time_start
