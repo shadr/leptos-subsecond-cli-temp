@@ -22,6 +22,7 @@ pub struct Builder {
     patch_sender: BroadcastSender<DevserverMsg>,
     pid: Option<u32>,
     aslr_reference: Arc<AtomicU64>,
+    running_binary: Option<Child>,
 }
 
 impl Builder {
@@ -37,6 +38,7 @@ impl Builder {
             patch_sender,
             pid: None,
             aslr_reference,
+            running_binary: None,
         }
     }
 
@@ -93,14 +95,24 @@ impl Builder {
         );
     }
 
-    pub fn run_if_native(&mut self, path: &Path) -> Option<Child> {
+    pub fn run_if_native(&mut self, path: &Path) {
         if self.ctx.bin.is_some() {
             let mut exe_cmd = Command::new(path);
+            exe_cmd.env("LEPTOS_OUTPUT_NAME", &self.ctx.package);
             let new_exe = exe_cmd.spawn().unwrap();
             self.pid = Some(new_exe.id());
-            Some(new_exe)
-        } else {
-            None
+            self.running_binary = Some(new_exe);
+        }
+    }
+}
+
+impl Drop for Builder {
+    fn drop(&mut self) {
+        if let Some(process) = &mut self.running_binary {
+            match process.kill() {
+                Ok(_) => tracing::debug!("Killed executable successfully"),
+                Err(_) => tracing::error!("Couldn't kill running executable!"),
+            }
         }
     }
 }

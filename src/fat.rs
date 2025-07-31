@@ -325,6 +325,7 @@ fn clean_fingerprint(ctx: &Context) {
 pub fn build_fat(ctx: &Context) -> PathBuf {
     tracing::debug!("Fat build started");
     let time_start = Instant::now();
+
     clean_fingerprint(ctx);
 
     let mut cmd = build_fat_command(ctx);
@@ -388,23 +389,25 @@ pub fn build_fat_command(ctx: &Context) -> Command {
         .arg(&ctx.package)
         .arg("--target")
         .arg(ctx.triple.to_string());
+
     if ctx.no_default_features {
         command.arg("--no-default-features");
     }
+
     if let Some(bin_name) = &ctx.bin {
         command.arg("--bin").arg(bin_name);
     }
     if ctx.lib {
         command.arg("--lib");
     }
+
     if !ctx.features.is_empty() {
         command.arg("--features");
         for feature in &ctx.features {
             command.arg(feature);
         }
     }
-    // .arg("--message-format")
-    // .arg("json-diagnostic-rendered-ansi")
+
     command.arg("--").arg("-Clinker=dx");
     if ctx.triple.operating_system == OperatingSystem::Linux {
         command

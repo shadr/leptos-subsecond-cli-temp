@@ -100,8 +100,8 @@ fn main() {
 
     let mut builder = builder::Builder::new(ctx, tx, aslr_reference);
 
-    let exe_path = builder.build_fat();
-    let exe = builder.run_if_native(&exe_path);
+    let binary_path = builder.build_fat();
+    builder.run_if_native(&binary_path);
 
     let mut line = String::new();
     loop {
@@ -117,8 +117,5 @@ fn main() {
             }
             _ => (),
         }
-    }
-    if let Some(mut exe) = exe {
-        exe.kill().unwrap();
     }
 }
