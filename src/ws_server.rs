@@ -1,4 +1,8 @@
-use std::{net::TcpListener, sync::mpsc::Sender, time::Duration};
+use std::{
+    net::TcpListener,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use dioxus_devtools::DevserverMsg;
 use tungstenite::handshake::server::{Request, Response};
@@ -6,19 +10,19 @@ use tungstenite::handshake::server::{Request, Response};
 pub struct HotPatchServer {
     addr: String,
     patch_receiver: multiqueue::BroadcastReceiver<DevserverMsg>,
-    aslr_sender: Sender<u64>,
+    aslr_reference: Arc<AtomicU64>,
 }
 
 impl HotPatchServer {
     pub fn new(
         addr: &str,
         patch_receiver: multiqueue::BroadcastReceiver<DevserverMsg>,
-        aslr_sender: Sender<u64>,
+        aslr_reference: Arc<AtomicU64>,
     ) -> Self {
         Self {
             addr: addr.to_string(),
             patch_receiver,
-            aslr_sender,
+            aslr_reference,
         }
     }
 
@@ -34,18 +38,23 @@ impl HotPatchServer {
         for new_stream in server.incoming() {
             if let Ok(stream) = new_stream {
                 let channel = self.patch_receiver.add_stream();
-                let aslr_tx_clone = self.aslr_sender.clone();
+                let aslr_reference = Arc::clone(&self.aslr_reference);
                 std::thread::spawn(move || {
                     let mut websocket =
                         tungstenite::accept_hdr(stream, |request: &Request, response: Response| {
                             if let Some(query) = request.uri().query() {
                                 let split = query.split("&");
-                                // very ugly and bad hack to get aslr of a executable back
+                                // a little bit ugly hack to get aslr back to the builder
                                 // TODO: find another way to get aslr reference back
                                 for s in split {
                                     if let Some(aslr_str) = s.strip_prefix("aslr_reference=") {
-                                        if let Ok(aslr_reference) = aslr_str.parse() {
-                                            aslr_tx_clone.send(aslr_reference).unwrap();
+                                        if let Ok(new_aslr_reference) = aslr_str.parse() {
+                                            if new_aslr_reference != 0 {
+                                                aslr_reference.store(
+                                                    new_aslr_reference,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                            }
                                         }
                                         break;
                                     }

@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU64},
     time::Instant,
 };
 
@@ -21,16 +21,22 @@ pub struct Builder {
     rustc_args: RustcArgs,
     patch_sender: BroadcastSender<DevserverMsg>,
     pid: Option<u32>,
+    aslr_reference: Arc<AtomicU64>,
 }
 
 impl Builder {
-    pub fn new(ctx: Context, patch_sender: BroadcastSender<DevserverMsg>) -> Self {
+    pub fn new(
+        ctx: Context,
+        patch_sender: BroadcastSender<DevserverMsg>,
+        aslr_reference: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             ctx,
             cache: Arc::new(HotpatchModuleCache::default()),
             rustc_args: RustcArgs::default(),
             patch_sender,
             pid: None,
+            aslr_reference,
         }
     }
 
@@ -48,8 +54,13 @@ impl Builder {
     }
 
     pub fn build_thin(&self) {
-        // TODO: fix native builds, store pid:aslr map
-        let aslr_reference = 0;
+        let aslr_reference = self
+            .aslr_reference
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if !self.ctx.is_wasm_or_wasi() && aslr_reference == 0 {
+            tracing::error!("Thin build canceled, aslr reference is 0 on non-wasm build!");
+            return;
+        }
         let time_start = thin::build_thin(&self.ctx, &self.rustc_args, aslr_reference, &self.cache);
 
         let new = self.ctx.patch_exe(time_start);

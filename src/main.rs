@@ -5,9 +5,8 @@ mod patch;
 mod thin;
 mod ws_server;
 
-use std::path::PathBuf;
-use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::sync::Arc;
+use std::{path::PathBuf, sync::atomic::AtomicU64};
 
 use clap::Parser;
 use context::Context;
@@ -72,9 +71,10 @@ fn main() {
     let link_err_file = NamedTempFile::with_suffix(".txt").unwrap();
     dbg!(link_err_file.path());
 
+    let aslr_reference = Arc::new(AtomicU64::new(0));
+
     let (tx, rx) = multiqueue::broadcast_queue(10);
-    let (aslr_tx, aslr_rx) = channel();
-    let hp_server = HotPatchServer::new("127.0.0.1:3100", rx, aslr_tx);
+    let hp_server = HotPatchServer::new("127.0.0.1:3100", rx, Arc::clone(&aslr_reference));
     std::thread::spawn(move || hp_server.run());
 
     let ctx = Context {
@@ -98,18 +98,10 @@ fn main() {
         wasm_bindgen_dir: "wasm-bindgen".to_string(),
     };
 
-    let mut builder = builder::Builder::new(ctx, tx);
+    let mut builder = builder::Builder::new(ctx, tx, aslr_reference);
 
     let exe_path = builder.build_fat();
     let exe = builder.run_if_native(&exe_path);
-
-    let mut aslr_reference = 0;
-    if let Ok(aslr) = aslr_rx.recv_timeout(Duration::from_secs(1)) {
-        aslr_reference = aslr;
-    } else {
-        dbg!("aslr timeout");
-    }
-    dbg!(aslr_reference);
 
     let mut line = String::new();
     loop {
