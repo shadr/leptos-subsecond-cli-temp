@@ -6,11 +6,11 @@ cd leptos-subsecond-cli-temp
 RUST_LOG=debug LEPTOS_OUTPUT_NAME=your-package cargo run --release -- --manifest-path ../your-project/Cargo.toml leptos --package your-package --server-bin your-server-bin --server-features ssr --lib-features hydrate --server-no-default-features --lib-no-default-features
 ```
 
-Currently there is no file watcher, so to hot reload or do a full rebuild you need to enter "r" or "R" symbols into stdin respectively.
+Currently there is no file watcher, so to hot reload or do a full rebuild you would need to enter "r" or "R" characters into stdin respectively.
 
 # How it works
 
-Here I outline how my understanding of how fat and thin builds work:
+Here I outline my understanding of how fat and thin builds work:
 
 ## Fat builds
 Fat builds are big and slow, we compile every dependency into a shared library without removing any dead code
